@@ -19,144 +19,137 @@ entity keyb is port(
 end keyb;
 
 architecture a_keyb of keyb is
+	signal bit_position : unsigned(3 downto 0);
 	signal data_reg : std_logic_vector(8 downto 0);
 	signal data_ready : std_logic;
 	signal avalon_data_ready : std_logic;
-	signal precteno : std_logic;
-	signal key_data : std_logic_vector(7 downto 0);
-	signal data_ready_clear : std_logic:='0';
+	signal avalon_buffer : std_logic_vector(7 downto 0);
+	signal avalon_error : std_logic;
 	signal wdt_reset : std_logic;
 	signal wdt_counter : unsigned(16 downto 0);
 	signal wdt : std_logic;
+	signal reset_n : std_logic;
 
 begin
 
-	process(avalon_clk, wdt)
-	begin
+process(avalon_clk, global_reset_n)
+	variable dff1, dff2 : std_logic;
+begin
 
-		if (wdt = '0') then
+	if (global_reset_n = '0') then
+		dff1 := '0';
+		dff2 := '0';
+		reset_n <= '0';
+	elsif (avalon_clk'event and avalon_clk = '1') then
 
-			wdt_counter <= (others => '0');
-			wdt_reset <= '0';
+		dff2 := dff1;
+		dff1 := '1';
 
-		elsif (avalon_clk'event and avalon_clk = '1') then
+		reset_n <= dff2 and avalon_reset_n;
 
-			if (wdt_counter > 125000) then	-- max. doba paketu nesmi byt vic nez 2ms => avalon_clk T=20ns => 2ms/20n = 100000 + rezerva
-				wdt_reset <= '1';
-			else
-				wdt_counter <= wdt_counter + 1;
-			end if;
+	end if;
 
+
+end process;
+
+process(avalon_clk, wdt)
+begin
+
+	if (wdt = '0') then
+		wdt_counter <= (others => '0');
+		wdt_reset <= '0';
+
+	elsif (avalon_clk'event and avalon_clk = '1') then
+
+		if (wdt_counter > 125000) then	-- max. doba paketu nesmi byt vic nez 2ms => avalon_clk T=20ns => 2ms/20n = 100000 + rezerva
+			wdt_reset <= '1';
+		else
+			wdt_counter <= wdt_counter + 1;
 		end if;
 
-	end process;
+	end if;
 
-	process(kb_clk, avalon_reset_n, wdt_reset)
-		variable bit_pos : integer range 0 to 11;	-- bitova pozice
-		variable parita : std_logic;
-	begin
+end process;
 
-		if (avalon_reset_n = '0' or wdt_reset = '1') then
-			bit_pos := 0;
-			data_reg <= (others => '0');
+process(kb_clk, reset_n, wdt_reset)
+	variable parity : std_logic;
+begin
+
+	if (reset_n = '0' or wdt_reset = '1') then
+
+		parity := '0';
+		bit_position <= (others => '0');
+		data_reg <= (others => '0');
+		data_ready <= '0';
+		wdt <= '0';
+
+	elsif (kb_clk'event and kb_clk = '0') then
+
+		if (bit_position = 0 and kb_data = '0') then	-- start bit
+			parity := '0';
+			bit_position <= (0 => '1', others => '0');
 			data_ready <= '0';
-			parita := '0';
-			wdt <= '0';
-			report "KB reset";
+			wdt <= '1';
 
-        elsif (kb_clk'event and kb_clk = '0') then
+		elsif (bit_position = 10) then
 
 			wdt <= '0';
+			bit_position <= (others => '0');
 
-			if (bit_pos = 0 and kb_data = '0' and data_ready = '0') then --start bit
-				bit_pos := 1;
-				parita := '0';
-				wdt <= '1';
-				report "Start bit";
-			elsif (bit_pos = 10) then
-
-				bit_pos := 0;
-				wdt <= '1';
-
-				if (kb_data = '1' and parita = '1') then -- test stop bitu a parity
-					data_ready <= '1';
-					report "Data ready";
-				else
-					data_ready <= '0';
-					report "Data error";
-				end if;
-
-			elsif (bit_pos >= 1) then
-				data_reg <= kb_data & data_reg(8 downto 1);
-				bit_pos := bit_pos + 1;
-				parita := parita xor kb_data;
-				wdt <= '1';
+			if (kb_data = '1' and parity = '1') then
+				data_ready <= '1';
+				report "Data ready" severity note;
 			else
-				if(data_ready_clear = '1') then
-					data_ready <= '0';
-			   end if;
+				data_ready <= '0';
+				report "Data error" severity note;
 			end if;
+
+		elsif (bit_position >= 1) then
+			data_reg <= kb_data & data_reg(8 downto 1);
+			parity := parity xor kb_data;
+			bit_position <= bit_position + 1;
 
 		end if;
 
-    end process;
+	end if;
 
-	process(avalon_clk, avalon_reset_n, wdt_reset) -- resynchronizace data_ready -> avalon_data_ready
-		variable dff,dff1,dff2 : std_logic;
-	begin
+end process;
 
-		if(avalon_reset_n = '0') then
-			dff := '0';
-			dff1:= '0';
-			dff2:='0';
-			avalon_data_ready <= '0';
-			precteno <= '0';
-			key_data <= (others => '0');
+process(avalon_clk, reset_n)
+	variable dff1, dff2, dff3 : std_logic;
+begin
 
-		elsif(avalon_clk'event and avalon_clk = '1') then
+	if (reset_n = '0') then
+		dff1 := '0';
+		dff2 := '0';
+		dff3 := '0';
+		avalon_data_ready <= '0';
+		avalon_buffer <= (others => '0');
+		avalon_error <= '0';
 
-			if(dff1 = '1' and dff2='0') then	-- detekce hrany
+	elsif (avalon_clk'event and avalon_clk = '1') then
 
-				key_data <= data_reg(7 downto 0);
-				avalon_data_ready<='1';
-
+		if (dff2 = '1' and dff3 = '0') then
+			if (avalon_data_ready = '1') then
+				avalon_error <= '1';
 			end if;
-
-			if(avalon_read = '1') then
-
-				avalon_data_ready <='0';
-				precteno <= not precteno;
-
-			end if;
-
-			dff2 := dff1;
-			dff1 := dff;
-			dff := data_ready;
-		end if;
-	end process;
-
-
-	process(kb_clk) -- resynchronizace data_ready_clear
-
-		variable dff,dff1,dff2 : std_logic := '0';
-
-	begin
-
-		if(kb_clk='0' and kb_clk'event ) then
-
-			data_ready_clear <= dff2 xor dff1;
-
-			dff2 := dff1;
-			dff1 := dff;
-			dff := precteno;
-
+			avalon_data_ready <= '1';
+			avalon_buffer <= data_reg(7 downto 0);
 		end if;
 
-	end process;
+		if(avalon_read = '1') then
+			avalon_data_ready <='0';
+		end if;
 
-	avalon_readdata <= key_data;
+		dff3 := dff2;
+		dff2 := dff1;
+		dff1 := data_ready;
 
-	avalon_irq <= avalon_data_ready;
+	end if;
 
+end process;
+
+avalon_irq <= avalon_data_ready;
+avalon_readdata <= avalon_buffer;
 
 end a_keyb;
